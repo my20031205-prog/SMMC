@@ -1,0 +1,1174 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  Check, Plus, X, Trash2, ChevronDown, LayoutGrid, ListTodo, 
+  ChevronLeft, Target, MoreVertical, Smile, Sun, Moon, 
+  Calendar, Zap, AlertCircle, Inbox, Eye, EyeOff 
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import EmojiPicker, { EmojiClickData, Theme } from 'emoji-picker-react';
+import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
+
+// --- Types ---
+
+export type MatrixQuadrant = 'urgent-important' | 'not-urgent-important' | 'urgent-not-important' | 'not-urgent-not-important';
+
+export interface MatrixTask {
+  id: string;
+  title: string;
+  completed: boolean;
+  quadrant: MatrixQuadrant | 'inbox';
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface Category {
+  id: string;
+  title: string;
+  tasks: Task[];
+}
+
+export interface MainGoal {
+  id: string;
+  title: string;
+  color: string;
+  emoji: string;
+  categories: Category[];
+  completedAt?: number;
+}
+
+// --- Helper Logic ---
+
+export const calculateCategoryProgress = (category: Category): number => {
+  if (category.tasks.length === 0) return 0;
+  const completed = category.tasks.filter(t => t.completed).length;
+  return (completed / category.tasks.length) * 100;
+};
+
+export const calculateMainGoalProgress = (goal: MainGoal): number => {
+  const allTasks = goal.categories.flatMap(c => c.tasks);
+  if (allTasks.length === 0) return 0;
+  const completed = allTasks.filter(t => t.completed).length;
+  return (completed / allTasks.length) * 100;
+};
+
+// --- Constants ---
+const STORAGE_KEY = 'zenith_goals_v2_data';
+const MATRIX_KEY = 'zenith_goals_matrix_data';
+const THEME_KEY = 'zenith_goals_theme';
+
+const COLORS = [
+  { name: 'Blue', value: '#007AFF' },
+  { name: 'Red', value: '#FF3B30' },
+  { name: 'Orange', value: '#FF9500' },
+  { name: 'Green', value: '#34C759' },
+  { name: 'Purple', value: '#AF52DE' },
+  { name: 'Pink', value: '#FF2D55' },
+];
+
+const EMOJIS = ['✈️', '🏋️', '📚', '💼', '🏠', '🎮', '💡', '🌱', '🎨', '🍳'];
+
+const INITIAL_DATA: MainGoal[] = [
+  {
+    id: 'japan-trip',
+    title: "Japan Travel Preparation",
+    color: '#007AFF',
+    emoji: '✈️',
+    categories: [
+      {
+        id: 'cat-logistics',
+        title: "Logistics",
+        tasks: [
+          { id: 't1', title: "Book Flight Tickets", completed: true },
+          { id: 't2', title: "Reserve Hotel in Tokyo", completed: false },
+          { id: 't3', title: "Apply for International Roaming", completed: false },
+        ]
+      },
+      {
+        id: 'cat-itinerary',
+        title: "Itinerary Planning",
+        tasks: [
+          { id: 't4', title: "Buy Disney Sea Tickets", completed: false },
+          { id: 't5', title: "Reserve Omakese Dinner", completed: false },
+        ]
+      }
+    ]
+  }
+];
+
+// --- Shared Components ---
+
+const ProgressBar = ({ progress, height = 6, className = "", color = "#007AFF" }: { progress: number, height?: number, className?: string, color?: string }) => (
+  <div className={`w-full bg-black/5 dark:bg-white/10 rounded-full overflow-hidden ${className}`} style={{ height }}>
+    <motion.div 
+      className="h-full rounded-full"
+      style={{ backgroundColor: color }}
+      initial={{ width: 0 }}
+      animate={{ width: `${progress}%` }}
+      transition={{ type: "spring", stiffness: 50, damping: 15 }}
+    />
+  </div>
+);
+
+const CircularCheckbox = ({ checked, onToggle, color = "#007AFF" }: { checked: boolean, onToggle: () => void, color?: string }) => (
+  <button 
+    onClick={onToggle}
+    className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all duration-200 ${
+      checked 
+        ? 'border-transparent' 
+        : 'border-black dark:border-white bg-white dark:bg-white/5 hover:border-black/80 dark:hover:border-white/80'
+    }`}
+    style={{ backgroundColor: checked ? color : undefined }}
+  >
+    <AnimatePresence>
+      {checked && (
+        <motion.div
+          initial={{ scale: 0, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          exit={{ scale: 0, opacity: 0 }}
+        >
+          <Check className="w-4 h-4 text-white stroke-[3px]" />
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </button>
+);
+
+// --- Dashboard Components ---
+
+const GoalCard = ({ goal, onClick, onDelete, onEdit }: { goal: MainGoal, onClick: () => void, onDelete: () => void, onEdit: () => void }) => {
+  const progress = useMemo(() => calculateMainGoalProgress(goal), [goal]);
+  const taskCount = goal.categories.reduce((acc, c) => acc + c.tasks.length, 0);
+  const completedCount = goal.categories.reduce((acc, c) => acc + c.tasks.filter(t => t.completed).length, 0);
+  const themeColor = goal.color || '#007AFF';
+  const isCompleted = progress === 100;
+
+  return (
+    <motion.div 
+      layout
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: isCompleted ? 0.4 : 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      whileHover={{ y: isCompleted ? 0 : -4 }}
+      className={`bg-white dark:bg-[#1C1C1E] rounded-[24px] p-6 shadow-sm border border-black/5 dark:border-white/5 cursor-pointer group relative transition-opacity duration-500`}
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between mb-6">
+        <div 
+          className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl"
+          style={{ backgroundColor: `${themeColor}15` }}
+        >
+          {goal.emoji || <Target className="w-6 h-6" style={{ color: themeColor }} />}
+        </div>
+        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button 
+            onClick={(e) => { e.stopPropagation(); onEdit(); }}
+            className="p-2 text-black/10 dark:text-white/10 hover:text-black/40 dark:hover:text-white/40 transition-colors"
+          >
+            <MoreVertical className="w-4 h-4" />
+          </button>
+          <button 
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="p-2 text-black/10 dark:text-white/10 hover:text-red-500 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <h3 className={`text-[22px] font-bold text-black dark:text-white mb-1 leading-tight flex items-center gap-2 ${isCompleted ? 'line-through' : ''}`}>
+        {goal.title}
+      </h3>
+      <p className="text-[15px] font-medium text-black/40 dark:text-white/40 mb-6">
+        {completedCount} of {taskCount} tasks completed
+      </p>
+
+      <div className="space-y-2">
+        <div className="flex justify-between items-center">
+          <span className="text-[13px] font-bold uppercase tracking-wider" style={{ color: themeColor }}>Progress</span>
+          <span className="text-[15px] font-bold text-black dark:text-white">{Math.round(progress)}%</span>
+        </div>
+        <ProgressBar progress={progress} height={10} color={themeColor} />
+      </div>
+    </motion.div>
+  );
+};
+
+// --- Detail View Components ---
+
+const TaskItem = ({ task, onToggle, onDelete, color, isDarkMode }: { task: Task, onToggle: () => void, onDelete: () => void, color?: string, isDarkMode: boolean }) => {
+  const [isDeleting, setIsDeleting] = useState(false);
+  const contrastColor = isDarkMode ? '#FFFFFF' : '#000000';
+
+  return (
+    <motion.div 
+      layout
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 20 }}
+      className="flex items-center gap-4 py-3 group relative"
+    >
+      <CircularCheckbox checked={task.completed} onToggle={onToggle} color={color} />
+      <span 
+        className={`text-[17px] flex-1 transition-colors duration-200 ${task.completed ? 'line-through' : ''}`}
+        style={{ color: contrastColor }}
+      >
+        {task.title}
+      </span>
+      <button 
+        onClick={() => setIsDeleting(true)}
+        className="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:text-red-500"
+        style={{ color: contrastColor }}
+      >
+        <Trash2 className="w-4 h-4" />
+      </button>
+
+      <AnimatePresence>
+        {isDeleting && (
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="absolute inset-0 bg-white dark:bg-[#1C1C1E] flex items-center justify-end gap-2 pr-2"
+          >
+            <span className="text-xs font-semibold text-red-500 uppercase tracking-wider">Delete?</span>
+            <button onClick={onDelete} className="bg-red-500 text-white px-3 py-1 rounded-lg text-sm font-medium">Confirm</button>
+            <button onClick={() => setIsDeleting(false)} className="bg-black/5 dark:bg-white/10 px-3 py-1 rounded-lg text-sm font-medium text-black dark:text-white">Cancel</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+};
+
+const CategorySection = ({ 
+  category, 
+  onToggleTask,
+  onDeleteTask,
+  onDeleteCategory,
+  color,
+  isDarkMode
+}: { 
+  category: Category, 
+  onToggleTask: (taskId: string) => void,
+  onDeleteTask: (taskId: string) => void,
+  onDeleteCategory: () => void,
+  color?: string,
+  isDarkMode: boolean
+}) => {
+  const progress = useMemo(() => calculateCategoryProgress(category), [category]);
+  const contrastColor = isDarkMode ? '#FFFFFF' : '#000000';
+
+  return (
+    <motion.div layout className="mb-8">
+      <div className="flex flex-col mb-2">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-[20px] font-semibold" style={{ color: contrastColor }}>{category.title}</h3>
+          <button 
+            onClick={onDeleteCategory}
+            className="p-2 hover:text-red-500 transition-colors"
+            style={{ color: contrastColor }}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <ProgressBar progress={progress} height={4} className="flex-1" color={color} />
+          <span className="text-[13px] font-medium w-8 text-right" style={{ color: contrastColor }}>
+            {Math.round(progress)}%
+          </span>
+        </div>
+      </div>
+      <div className="divide-y divide-black/5 dark:divide-white/5">
+        <AnimatePresence mode="popLayout">
+          {category.tasks.map(task => (
+            <TaskItem 
+              key={task.id} 
+              task={task} 
+              onToggle={() => onToggleTask(task.id)} 
+              onDelete={() => onDeleteTask(task.id)}
+              color={color}
+              isDarkMode={isDarkMode}
+            />
+          ))}
+        </AnimatePresence>
+        {category.tasks.length === 0 && (
+          <p className="py-4 text-center text-sm italic" style={{ color: contrastColor }}>No tasks in this category</p>
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
+// --- Matrix Components ---
+
+const MatrixQuadrantBox = ({ 
+  title, 
+  icon: Icon, 
+  color, 
+  tasks, 
+  id,
+  onToggleTask,
+  isDarkMode
+}: { 
+  title: string, 
+  icon: any, 
+  color: string, 
+  tasks: MatrixTask[], 
+  id: string,
+  onToggleTask: (taskId: string) => void,
+  isDarkMode: boolean
+}) => {
+  const bgColor = isDarkMode ? `${color}40` : `${color}15`;
+  const borderColor = isDarkMode ? `${color}60` : `${color}30`;
+  const contrastColor = isDarkMode ? '#FFFFFF' : '#000000';
+
+  return (
+    <div 
+      className="flex flex-col h-full min-h-[200px] rounded-3xl p-4 border transition-all duration-300"
+      style={{ 
+        backgroundColor: bgColor,
+        borderColor: borderColor,
+      }}
+    >
+      <div className="flex items-center gap-2 mb-4">
+        <div className="p-2 rounded-xl" style={{ backgroundColor: `${color}20` }}>
+          <Icon className="w-4 h-4" style={{ color: contrastColor }} />
+        </div>
+        <h4 className="text-[15px] font-bold uppercase tracking-wider" style={{ color: contrastColor }}>{title}</h4>
+      </div>
+    
+    <Droppable droppableId={id}>
+      {(provided, snapshot) => (
+        <div 
+          ref={provided.innerRef} 
+          {...provided.droppableProps}
+          className={`flex-1 space-y-2 transition-colors rounded-2xl p-1 ${snapshot.isDraggingOver ? 'bg-black/5 dark:bg-white/5' : ''}`}
+        >
+          {tasks.map((task, index) => (
+            <Draggable key={task.id} draggableId={task.id} index={index}>
+              {(provided, snapshot) => (
+                <div
+                  ref={provided.innerRef}
+                  {...provided.draggableProps}
+                  {...provided.dragHandleProps}
+                  className={`bg-white dark:bg-[#2C2C2E] p-4 rounded-2xl shadow-sm border border-black/5 dark:border-white/5 flex items-center gap-3 ${snapshot.isDragging ? 'shadow-xl ring-2 ring-[#007AFF]/20' : ''} ${task.completed ? 'opacity-50' : ''}`}
+                >
+                  <CircularCheckbox 
+                    checked={task.completed} 
+                    onToggle={() => onToggleTask(task.id)} 
+                    color={color} 
+                  />
+                  <span 
+                    className={`text-[15px] font-medium flex-1 ${task.completed ? 'line-through' : ''}`}
+                    style={{ color: contrastColor }}
+                  >
+                    {task.title}
+                  </span>
+                </div>
+              )}
+            </Draggable>
+          ))}
+          {provided.placeholder}
+          {tasks.length === 0 && !snapshot.isDraggingOver && (
+            <div className="h-full flex items-center justify-center border-2 border-dashed border-black/5 dark:border-white/5 rounded-2xl py-8">
+              <p className="text-xs font-medium uppercase tracking-widest" style={{ color: contrastColor }}>Empty</p>
+            </div>
+          )}
+        </div>
+      )}
+    </Droppable>
+  </div>
+  );
+};
+
+const EisenhowerMatrix = ({ 
+  tasks, 
+  onDragEnd, 
+  onAddTask,
+  onToggleTask,
+  isDarkMode
+}: { 
+  tasks: MatrixTask[], 
+  onDragEnd: (result: DropResult) => void,
+  onAddTask: () => void,
+  onToggleTask: (taskId: string) => void,
+  isDarkMode: boolean
+}) => {
+  const [hideCompleted, setHideCompleted] = useState(false);
+
+  const quadrants: { id: MatrixQuadrant, title: string, icon: any, color: string }[] = [
+    { id: 'urgent-important', title: 'Do Now', icon: Zap, color: '#FF3B30' },
+    { id: 'not-urgent-important', title: 'Schedule', icon: Calendar, color: '#007AFF' },
+    { id: 'urgent-not-important', title: 'Delegate', icon: Target, color: '#FF9500' },
+    { id: 'not-urgent-not-important', title: 'Eliminate', icon: Trash2, color: '#8E8E93' },
+  ];
+
+  const processTasks = (quadrantId: string) => {
+    let filtered = tasks.filter(t => t.quadrant === quadrantId);
+    
+    filtered.sort((a, b) => {
+      if (a.completed && !b.completed) return 1;
+      if (!a.completed && b.completed) return -1;
+      return 0;
+    });
+
+    if (hideCompleted) {
+      filtered = filtered.filter(t => !t.completed);
+    }
+
+    return filtered;
+  };
+
+  const inboxTasks = processTasks('inbox');
+  const contrastColor = isDarkMode ? '#FFFFFF' : '#000000';
+
+  return (
+    <div className="pb-32">
+      <header className="px-6 pt-16 pb-8">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div>
+            <h1 className="text-[34px] font-bold tracking-tight" style={{ color: contrastColor }}>Eisenhower Matrix</h1>
+            <p className="font-medium" style={{ color: contrastColor }}>Prioritize your tasks</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setHideCompleted(!hideCompleted)}
+              className={`p-3 rounded-full transition-all flex items-center gap-2 ${hideCompleted ? 'bg-[#007AFF] text-white' : 'bg-black/5 dark:bg-white/10'}`}
+              style={{ color: hideCompleted ? '#FFFFFF' : contrastColor }}
+              title={hideCompleted ? "Show Completed" : "Hide Completed"}
+            >
+              {hideCompleted ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+              <span className="text-xs font-bold uppercase tracking-wider hidden sm:inline">
+                {hideCompleted ? "Hidden" : "Hide Done"}
+              </span>
+            </button>
+            <button 
+              onClick={onAddTask}
+              className="bg-[#007AFF] p-3 rounded-full shadow-lg shadow-[#007AFF]/30 active:scale-90 transition-transform"
+            >
+              <Plus className="w-6 h-6 text-white" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-4xl mx-auto px-6 space-y-8">
+        <DragDropContext onDragEnd={onDragEnd}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {quadrants.map(q => (
+              <MatrixQuadrantBox 
+                key={q.id}
+                id={q.id}
+                title={q.title}
+                icon={q.icon}
+                color={q.color}
+                tasks={processTasks(q.id)}
+                onToggleTask={onToggleTask}
+                isDarkMode={isDarkMode}
+              />
+            ))}
+          </div>
+
+          <div className="mt-12">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="p-2 rounded-xl bg-black/5 dark:bg-white/5">
+                <Inbox className="w-5 h-5" style={{ color: contrastColor }} />
+              </div>
+              <h3 className="text-[20px] font-bold" style={{ color: contrastColor }}>Unclassified Inbox</h3>
+            </div>
+            
+            <Droppable droppableId="inbox">
+              {(provided, snapshot) => (
+                <div 
+                  ref={provided.innerRef} 
+                  {...provided.droppableProps}
+                  className={`min-h-[120px] bg-black/5 dark:bg-white/5 rounded-3xl p-6 border-2 border-dashed border-black/5 dark:border-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-black/10 dark:bg-white/10' : ''}`}
+                >
+                  <div className="flex flex-wrap gap-3">
+                    {inboxTasks.map((task, index) => (
+                      <Draggable key={task.id} draggableId={task.id} index={index}>
+                        {(provided, snapshot) => (
+                          <div
+                            ref={provided.innerRef}
+                            {...provided.draggableProps}
+                            {...provided.dragHandleProps}
+                            className={`bg-white dark:bg-[#2C2C2E] px-5 py-3 rounded-2xl shadow-sm border border-black/5 dark:border-white/5 flex items-center gap-3 text-[15px] font-medium ${snapshot.isDragging ? 'shadow-xl ring-2 ring-[#007AFF]/20' : ''} ${task.completed ? 'opacity-50' : ''}`}
+                            style={{ color: contrastColor }}
+                          >
+                            <CircularCheckbox 
+                              checked={task.completed} 
+                              onToggle={() => onToggleTask(task.id)} 
+                              color="#8E8E93" 
+                            />
+                            <span className={task.completed ? 'line-through' : ''}>
+                              {task.title}
+                            </span>
+                          </div>
+                        )}
+                      </Draggable>
+                    ))}
+                    {provided.placeholder}
+                    {inboxTasks.length === 0 && !snapshot.isDraggingOver && (
+                      <div className="w-full text-center py-4">
+                        <p className="text-[15px] font-medium" style={{ color: contrastColor }}>Drag tasks here to unclassify them</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </Droppable>
+          </div>
+        </DragDropContext>
+      </main>
+    </div>
+  );
+};
+
+const AddModal = ({ 
+  isOpen, 
+  onClose, 
+  onAdd, 
+  categories,
+  mode = 'item',
+  initialData,
+  isDarkMode
+}: { 
+  isOpen: boolean, 
+  onClose: () => void, 
+  onAdd: (type: 'category' | 'task' | 'goal' | 'matrix', title: string, options?: { categoryId?: string, color?: string, emoji?: string }) => void,
+  categories: Category[],
+  mode?: 'item' | 'goal' | 'matrix',
+  initialData?: { title: string, color?: string, emoji?: string },
+  isDarkMode: boolean
+}) => {
+  const [type, setType] = useState<'category' | 'task' | 'goal' | 'matrix'>(mode === 'goal' ? 'goal' : mode === 'matrix' ? 'matrix' : 'task');
+  const [title, setTitle] = useState('');
+  const [selectedCategoryId, setSelectedCategoryId] = useState('');
+  const [selectedColor, setSelectedColor] = useState(COLORS[0].value);
+  const [selectedEmoji, setSelectedEmoji] = useState(EMOJIS[0]);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setTitle(initialData?.title || '');
+      setType(mode === 'goal' ? 'goal' : mode === 'matrix' ? 'matrix' : 'task');
+      setSelectedColor(initialData?.color || COLORS[0].value);
+      setSelectedEmoji(initialData?.emoji || EMOJIS[0]);
+      setShowEmojiPicker(false);
+      if (categories.length > 0) {
+        setSelectedCategoryId(categories[0].id);
+      }
+    }
+  }, [isOpen, categories, mode, initialData]);
+
+  const onEmojiClick = (emojiData: EmojiClickData) => {
+    setSelectedEmoji(emojiData.emoji);
+    setShowEmojiPicker(false);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    onAdd(type, title, { 
+      categoryId: type === 'task' ? selectedCategoryId : undefined,
+      color: type === 'goal' ? selectedColor : undefined,
+      emoji: type === 'goal' ? selectedEmoji : undefined
+    });
+    onClose();
+  };
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40"
+          />
+          <motion.div 
+            initial={{ y: "100%" }}
+            animate={{ y: 0 }}
+            exit={{ y: "100%" }}
+            transition={{ type: "spring", damping: 25, stiffness: 200 }}
+            className="fixed bottom-0 left-0 right-0 bg-white dark:bg-[#1C1C1E] rounded-t-[32px] z-50 px-6 pt-4 pb-12 shadow-2xl max-w-2xl mx-auto overflow-y-auto max-h-[90vh]"
+          >
+            <div className="w-12 h-1.5 bg-black/10 dark:bg-white/10 rounded-full mx-auto mb-6" />
+            
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="text-[24px] font-bold text-black dark:text-white">
+                {initialData ? 'Edit' : 'Add New'} {type === 'goal' ? 'Goal' : type === 'matrix' ? 'Matrix Task' : type === 'category' ? 'Category' : 'Task'}
+              </h2>
+              <button onClick={onClose} className="p-2 bg-black/5 dark:bg-white/10 rounded-full text-black dark:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-8">
+              {mode === 'item' && (
+                <div className="flex p-1 bg-black/5 dark:bg-white/5 rounded-xl">
+                  <button 
+                    type="button"
+                    onClick={() => setType('task')}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-[15px] font-semibold transition-all ${type === 'task' ? 'bg-white dark:bg-[#2C2C2E] shadow-sm text-[#007AFF]' : 'text-black/40 dark:text-white/40'}`}
+                  >
+                    <ListTodo className="w-4 h-4" />
+                    Task
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => setType('category')}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-[15px] font-semibold transition-all ${type === 'category' ? 'bg-white dark:bg-[#2C2C2E] shadow-sm text-[#007AFF]' : 'text-black/40 dark:text-white/40'}`}
+                  >
+                    <LayoutGrid className="w-4 h-4" />
+                    Category
+                  </button>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="text-[13px] font-semibold text-black/40 dark:text-white/40 uppercase tracking-wider ml-1">Title</label>
+                <input 
+                  autoFocus
+                  type="text" 
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder={type === 'task' || type === 'matrix' ? "e.g. Book museum tickets" : type === 'category' ? "e.g. Packing List" : "e.g. New Project"}
+                  className="w-full bg-black/5 dark:bg-white/5 border-none rounded-2xl px-5 py-4 text-[17px] text-black dark:text-white focus:ring-2 focus:ring-[#007AFF] transition-all placeholder:text-black/20 dark:placeholder:text-white/20"
+                />
+              </div>
+
+              {type === 'goal' && (
+                <>
+                  <div className="space-y-3">
+                    <label className="text-[13px] font-semibold text-black/40 dark:text-white/40 uppercase tracking-wider ml-1">Color</label>
+                    <div className="flex flex-wrap gap-4">
+                      {COLORS.map(color => (
+                        <button
+                          key={color.value}
+                          type="button"
+                          onClick={() => setSelectedColor(color.value)}
+                          className={`w-10 h-10 rounded-full transition-all ${selectedColor === color.value ? 'ring-4 ring-black/5 dark:ring-white/10 scale-110' : 'hover:scale-105'}`}
+                          style={{ backgroundColor: color.value }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-[13px] font-semibold text-black/40 dark:text-white/40 uppercase tracking-wider ml-1">Icon</label>
+                    <div className="flex items-center gap-4">
+                      <button
+                        type="button"
+                        onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                        className={`w-16 h-16 rounded-2xl text-3xl flex items-center justify-center transition-all bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10`}
+                      >
+                        {selectedEmoji}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                        className="flex items-center gap-2 text-[15px] font-semibold text-[#007AFF]"
+                      >
+                        <Smile className="w-5 h-5" />
+                        Choose Emoji
+                      </button>
+                    </div>
+                    
+                    <AnimatePresence>
+                      {showEmojiPicker && (
+                        <motion.div 
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="pt-2">
+                            <EmojiPicker 
+                              onEmojiClick={onEmojiClick}
+                              theme={isDarkMode ? Theme.DARK : Theme.LIGHT}
+                              width="100%"
+                              height={350}
+                              lazyLoadEmojis={true}
+                              skinTonesDisabled={true}
+                              searchDisabled={false}
+                              previewConfig={{ showPreview: false }}
+                            />
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </>
+              )}
+
+              {type === 'task' && categories.length > 0 && (
+                <div className="space-y-2">
+                  <label className="text-[13px] font-semibold text-black/40 dark:text-white/40 uppercase tracking-wider ml-1">Category</label>
+                  <div className="relative">
+                    <select 
+                      value={selectedCategoryId}
+                      onChange={(e) => setSelectedCategoryId(e.target.value)}
+                      className="w-full appearance-none bg-black/5 dark:bg-white/5 border-none rounded-2xl px-5 py-4 text-[17px] text-black dark:text-white focus:ring-2 focus:ring-[#007AFF] transition-all"
+                    >
+                      {categories.map(cat => (
+                        <option key={cat.id} value={cat.id}>{cat.title}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-5 top-1/2 -translate-y-1/2 w-5 h-5 text-black/20 dark:text-white/20 pointer-events-none" />
+                  </div>
+                </div>
+              )}
+
+              <button 
+                type="submit"
+                disabled={!title.trim()}
+                className="w-full bg-[#007AFF] text-white py-4 rounded-2xl text-[17px] font-bold shadow-lg shadow-[#007AFF]/20 active:scale-[0.98] transition-all disabled:opacity-50 disabled:active:scale-100"
+                style={{ backgroundColor: type === 'goal' ? selectedColor : undefined }}
+              >
+                {initialData ? 'Save Changes' : `Add ${type.charAt(0).toUpperCase() + type.slice(1)}`}
+              </button>
+            </form>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+};
+
+// --- Main App ---
+
+export default function App() {
+  const [goals, setGoals] = useState<MainGoal[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse saved data", e);
+      }
+    }
+    return INITIAL_DATA;
+  });
+
+  const [matrixTasks, setMatrixTasks] = useState<MatrixTask[]>(() => {
+    const saved = localStorage.getItem(MATRIX_KEY);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse matrix data", e);
+      }
+    }
+    return [];
+  });
+
+  const [currentGoalId, setCurrentGoalId] = useState<string | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalMode, setModalMode] = useState<'item' | 'goal' | 'matrix'>('goal');
+  const [activeTab, setActiveTab] = useState<'projects' | 'matrix'>('projects');
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem(THEME_KEY);
+    return saved === 'dark';
+  });
+
+  // Persistence
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(goals));
+  }, [goals]);
+
+  useEffect(() => {
+    localStorage.setItem(MATRIX_KEY, JSON.stringify(matrixTasks));
+  }, [matrixTasks]);
+
+  useEffect(() => {
+    localStorage.setItem(THEME_KEY, isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
+  const sortedGoals = useMemo(() => {
+    return [...goals].sort((a, b) => {
+      const progressA = calculateMainGoalProgress(a);
+      const progressB = calculateMainGoalProgress(b);
+      
+      const isCompletedA = progressA === 100;
+      const isCompletedB = progressB === 100;
+
+      if (isCompletedA && !isCompletedB) return 1;
+      if (!isCompletedA && isCompletedB) return -1;
+      
+      if (isCompletedA && isCompletedB) {
+        return (b.completedAt || 0) - (a.completedAt || 0);
+      }
+
+      return 0;
+    });
+  }, [goals]);
+
+  const currentGoal = useMemo(() => goals.find(g => g.id === currentGoalId), [goals, currentGoalId]);
+  const editingGoal = useMemo(() => goals.find(g => g.id === editingGoalId), [goals, editingGoalId]);
+
+  const handleToggleTask = (taskId: string) => {
+    setGoals(prevGoals => prevGoals.map(goal => {
+      if (goal.id !== currentGoalId) return goal;
+      
+      const updatedGoal = {
+        ...goal,
+        categories: goal.categories.map(cat => ({
+          ...cat,
+          tasks: cat.tasks.map(task => 
+            task.id === taskId ? { ...task, completed: !task.completed } : task
+          )
+        }))
+      };
+
+      const newProgress = calculateMainGoalProgress(updatedGoal);
+      if (newProgress === 100 && !goal.completedAt) {
+        updatedGoal.completedAt = Date.now();
+      } else if (newProgress < 100) {
+        updatedGoal.completedAt = undefined;
+      }
+
+      return updatedGoal;
+    }));
+  };
+
+  const handleDeleteTask = (taskId: string) => {
+    setGoals(prevGoals => prevGoals.map(goal => {
+      if (goal.id !== currentGoalId) return goal;
+      return {
+        ...goal,
+        categories: goal.categories.map(cat => ({
+          ...cat,
+          tasks: cat.tasks.filter(t => t.id !== taskId)
+        }))
+      };
+    }));
+  };
+
+  const handleDeleteCategory = (categoryId: string) => {
+    setGoals(prevGoals => prevGoals.map(goal => {
+      if (goal.id !== currentGoalId) return goal;
+      return {
+        ...goal,
+        categories: goal.categories.filter(c => c.id !== categoryId)
+      };
+    }));
+  };
+
+  const handleDeleteGoal = (goalId: string) => {
+    setGoals(prevGoals => prevGoals.filter(g => g.id !== goalId));
+  };
+
+  const handleAddItem = (type: 'category' | 'task' | 'goal' | 'matrix', title: string, options?: { categoryId?: string, color?: string, emoji?: string }) => {
+    if (editingGoalId && type === 'goal') {
+      setGoals(prev => prev.map(g => g.id === editingGoalId ? { ...g, title, color: options?.color, emoji: options?.emoji } : g));
+      setEditingGoalId(null);
+      return;
+    }
+
+    const id = Math.random().toString(36).substr(2, 9);
+    
+    if (type === 'matrix') {
+      const newTask: MatrixTask = { id, title, quadrant: 'inbox', completed: false };
+      setMatrixTasks(prev => [...prev, newTask]);
+      return;
+    }
+
+    if (type === 'goal') {
+      const newGoal: MainGoal = { 
+        id, 
+        title, 
+        categories: [], 
+        color: options?.color || COLORS[0].value,
+        emoji: options?.emoji || EMOJIS[0]
+      };
+      setGoals(prev => [...prev, newGoal]);
+      setCurrentGoalId(id);
+      return;
+    }
+
+    setGoals(prevGoals => prevGoals.map(goal => {
+      if (goal.id !== currentGoalId) return goal;
+      if (type === 'category') {
+        return {
+          ...goal,
+          categories: [...goal.categories, { id, title, tasks: [] }]
+        };
+      } else {
+        return {
+          ...goal,
+          categories: goal.categories.map(cat => 
+            cat.id === options?.categoryId 
+              ? { ...cat, tasks: [...cat.tasks, { id, title, completed: false }] }
+              : cat
+          )
+        };
+      }
+    }));
+  };
+
+  const handleToggleMatrixTask = (taskId: string) => {
+    setMatrixTasks(prev => prev.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t));
+  };
+
+  const openAddGoal = () => {
+    setEditingGoalId(null);
+    setModalMode('goal');
+    setIsModalOpen(true);
+  };
+
+  const openEditGoal = (goalId: string) => {
+    setEditingGoalId(goalId);
+    setModalMode('goal');
+    setIsModalOpen(true);
+  };
+
+  const openAddItem = () => {
+    setModalMode('item');
+    setIsModalOpen(true);
+  };
+
+  const openAddMatrixTask = () => {
+    setModalMode('matrix');
+    setIsModalOpen(true);
+  };
+
+  const onDragEnd = (result: DropResult) => {
+    const { destination, source, draggableId } = result;
+
+    if (!destination) return;
+    if (destination.droppableId === source.droppableId && destination.index === source.index) return;
+
+    setMatrixTasks(prev => {
+      const newTasks: MatrixTask[] = Array.from(prev);
+      const taskIndex = newTasks.findIndex(t => t.id === draggableId);
+      if (taskIndex === -1) return prev;
+
+      const [removed] = newTasks.splice(taskIndex, 1);
+      removed.quadrant = destination.droppableId as MatrixQuadrant | 'inbox';
+      
+      const quadrantTasks = newTasks.filter(t => t.quadrant === removed.quadrant);
+      const otherTasks = newTasks.filter(t => t.quadrant !== removed.quadrant);
+      
+      quadrantTasks.splice(destination.index, 0, removed);
+      return [...otherTasks, ...quadrantTasks];
+    });
+  };
+
+  return (
+    <div className={`min-h-screen font-sans transition-colors duration-300 ${isDarkMode ? 'dark bg-[#121212] text-white' : 'bg-[#F2F2F7] text-black'} selection:bg-[#007AFF]/20`}>
+      <AnimatePresence mode="wait">
+        {!currentGoalId ? (
+          <motion.div 
+            key={activeTab}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="pb-32"
+          >
+            {activeTab === 'projects' ? (
+              <div>
+                <header className="px-6 pt-16 pb-8">
+                  <div className="max-w-4xl mx-auto flex items-center justify-between">
+                    <div>
+                      <h1 className="text-[34px] font-bold tracking-tight">My Goals</h1>
+                      <p className="text-black/40 dark:text-white/40 font-medium">Track your progress</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={() => setIsDarkMode(!isDarkMode)}
+                        className="p-3 rounded-full bg-black/5 dark:bg-white/10 text-black dark:text-white hover:bg-black/10 dark:hover:bg-white/20 transition-all"
+                      >
+                        {isDarkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
+                      </button>
+                      <button 
+                        onClick={openAddGoal}
+                        className="bg-[#007AFF] p-3 rounded-full shadow-lg shadow-[#007AFF]/30 active:scale-90 transition-transform"
+                      >
+                        <Plus className="w-6 h-6 text-white" />
+                      </button>
+                    </div>
+                  </div>
+                </header>
+
+                <main className="max-w-4xl mx-auto px-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <AnimatePresence mode="popLayout">
+                      {sortedGoals.map(goal => (
+                        <GoalCard 
+                          key={goal.id} 
+                          goal={goal} 
+                          onClick={() => setCurrentGoalId(goal.id)}
+                          onDelete={() => handleDeleteGoal(goal.id)}
+                          onEdit={() => openEditGoal(goal.id)}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  </div>
+
+                  {goals.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
+                      <div className="w-20 h-20 bg-black/5 dark:bg-white/5 rounded-full flex items-center justify-center">
+                        <Target className="w-10 h-10 text-black/10 dark:text-white/10" />
+                      </div>
+                      <div>
+                        <h3 className="text-[20px] font-bold text-black/20 dark:text-white/20">No Goals Yet</h3>
+                        <p className="text-black/40 dark:text-white/40">Tap the + button to create your first goal</p>
+                      </div>
+                    </div>
+                  )}
+                </main>
+              </div>
+            ) : (
+              <EisenhowerMatrix 
+                tasks={matrixTasks} 
+                onDragEnd={onDragEnd} 
+                onAddTask={openAddMatrixTask} 
+                onToggleTask={handleToggleMatrixTask}
+                isDarkMode={isDarkMode}
+              />
+            )}
+          </motion.div>
+        ) : (
+          <motion.div 
+            key="detail"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className="min-h-screen pb-32 bg-white dark:bg-[#121212]"
+          >
+            <header className="sticky top-0 z-10 bg-white/80 dark:bg-[#121212]/80 backdrop-blur-xl border-b border-black/5 dark:border-white/5 px-6 pt-12 pb-6">
+              <div className="max-w-2xl mx-auto">
+                <div className="flex items-center justify-between mb-4">
+                  <button 
+                    onClick={() => setCurrentGoalId(null)}
+                    className="flex items-center gap-1 font-semibold -ml-1 hover:opacity-70 transition-opacity"
+                    style={{ color: currentGoal?.color || '#007AFF' }}
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                    Back
+                  </button>
+                  <button 
+                    onClick={() => setIsDarkMode(!isDarkMode)}
+                    className="p-2 rounded-full bg-black/5 dark:bg-white/10 text-black dark:text-white hover:bg-black/10 dark:hover:bg-white/20 transition-all"
+                  >
+                    {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                  </button>
+                </div>
+                
+                <div className="flex items-center justify-between mb-4">
+                  <h1 className="text-[34px] font-bold tracking-tight leading-tight flex items-center gap-3 text-black dark:text-white">
+                    <span className="text-4xl">{currentGoal?.emoji}</span>
+                    {currentGoal?.title}
+                  </h1>
+                  <button 
+                    onClick={openAddItem}
+                    className="p-2.5 rounded-full shadow-lg active:scale-90 transition-transform"
+                    style={{ 
+                      backgroundColor: currentGoal?.color || '#007AFF',
+                      boxShadow: `0 10px 20px -5px ${currentGoal?.color}40`
+                    }}
+                  >
+                    <Plus className="w-6 h-6 text-white" />
+                  </button>
+                </div>
+                
+                <div className="space-y-2">
+                  <div className="flex justify-between items-end">
+                    <span className="text-[15px] font-semibold" style={{ color: currentGoal?.color || '#007AFF' }}>Progress</span>
+                    <span className="text-[24px] font-bold text-black dark:text-white">
+                      {currentGoal ? Math.round(calculateMainGoalProgress(currentGoal)) : 0}%
+                    </span>
+                  </div>
+                  <ProgressBar 
+                    progress={currentGoal ? calculateMainGoalProgress(currentGoal) : 0} 
+                    height={10} 
+                    color={currentGoal?.color}
+                  />
+                </div>
+              </div>
+            </header>
+
+            <main className="max-w-2xl mx-auto px-6 py-8 pb-32">
+              <AnimatePresence mode="popLayout">
+                {currentGoal?.categories.map(category => (
+                  <CategorySection 
+                    key={category.id} 
+                    category={category} 
+                    onToggleTask={handleToggleTask} 
+                    onDeleteTask={handleDeleteTask}
+                    onDeleteCategory={() => handleDeleteCategory(category.id)}
+                    color={currentGoal?.color}
+                    isDarkMode={isDarkMode}
+                  />
+                ))}
+              </AnimatePresence>
+
+              {currentGoal?.categories.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
+                  <div className="w-20 h-20 bg-black/5 dark:bg-white/5 rounded-full flex items-center justify-center">
+                    <LayoutGrid className="w-10 h-10 text-black/10 dark:text-white/10" />
+                  </div>
+                  <div>
+                    <h3 className="text-[20px] font-bold text-black/20 dark:text-white/20">No Categories</h3>
+                    <p className="text-black/40 dark:text-white/40">Add categories to organize your tasks</p>
+                  </div>
+                </div>
+              )}
+            </main>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {!currentGoalId && (
+        <nav className="fixed bottom-0 left-0 right-0 bg-white/80 dark:bg-[#1C1C1E]/80 backdrop-blur-xl border-t border-black/5 dark:border-white/5 px-6 pb-8 pt-3 z-40">
+          <div className="max-w-md mx-auto flex items-center justify-around">
+            <button 
+              onClick={() => setActiveTab('projects')}
+              className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'projects' ? 'text-[#007AFF]' : 'text-black/20 dark:text-white/20'}`}
+            >
+              <LayoutGrid className="w-6 h-6" />
+              <span className="text-[11px] font-bold uppercase tracking-wider">Projects</span>
+            </button>
+            <button 
+              onClick={() => setActiveTab('matrix')}
+              className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'matrix' ? 'text-[#007AFF]' : 'text-black/20 dark:text-white/20'}`}
+            >
+              <Target className="w-6 h-6" />
+              <span className="text-[11px] font-bold uppercase tracking-wider">Matrix</span>
+            </button>
+          </div>
+        </nav>
+      )}
+
+      <AddModal 
+        isOpen={isModalOpen} 
+        onClose={() => {
+          setIsModalOpen(false);
+          setEditingGoalId(null);
+        }} 
+        onAdd={handleAddItem}
+        categories={currentGoal?.categories || []}
+        mode={modalMode}
+        initialData={editingGoal ? { 
+          title: editingGoal.title, 
+          color: editingGoal.color, 
+          emoji: editingGoal.emoji 
+        } : undefined}
+        isDarkMode={isDarkMode}
+      />
+    </div>
+  );
+}
